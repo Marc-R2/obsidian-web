@@ -1,122 +1,369 @@
 import React, { useEffect, useState } from "react";
 
+import compareVersions from "compare-versions";
 import ReactDOM from "react-dom";
 import Turndown from "turndown";
+import { gfm } from "turndown-plugin-gfm";
 import { Readability } from "@mozilla/readability";
 
 import Button from "@mui/material/Button";
-import MenuItem from "@mui/material/MenuItem";
-import Select from "@mui/material/Select";
 import ThemeProvider from "@mui/system/ThemeProvider";
 import IconButton from "@mui/material/IconButton";
 import Accordion from "@mui/material/Accordion";
 import AccordionDetails from "@mui/material/AccordionDetails";
 import AccordionSummary from "@mui/material/AccordionSummary";
-import Typography from "@mui/material/Typography";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
-import CircularProgress from "@mui/material/CircularProgress";
 import MaterialAlert from "@mui/material/Alert";
+import createCache from "@emotion/cache";
+import { CacheProvider } from "@emotion/react";
+import { default as DraggableRaw, DraggableProps } from "react-draggable";
 
 import SendIcon from "@mui/icons-material/SaveAlt";
 
-import { PurpleTheme } from "./theme";
+import styles from "./styles.css";
+
+import { DarkPurpleTheme } from "./theme";
 import Alert from "./components/Alert";
 import {
   AlertStatus,
-  ContentCache,
   ExtensionLocalSettings,
   ExtensionSyncSettings,
-  OutputPreset,
+  UrlOutputPreset,
   SearchJsonResponseItem,
   StatusResponse,
+  ObsidianResponse,
+  OutputPreset,
+  PreviewContext,
+  SearchJsonResponseItemWithMetadata,
+  UrlMentionContainer,
+  FormState,
 } from "./types";
 import {
   getLocalSettings,
   getSyncSettings,
-  obsidianRequest,
-  compileTemplate,
-  getUrlMentions,
-  getContentCache,
-  getPageMetadata,
-  setContentCache,
-  normalizeCacheUrl,
+  checkHasHostPermission,
+  requestHostPermission,
+  getWindowSelectionAsHtml,
+  compileTemplateCallback,
+  compileTemplateCallbackController,
 } from "./utils";
+import { getUrlMentions, obsidianRequest } from "./utils/requests";
 import RequestParameters from "./components/RequestParameters";
-import { TurndownConfiguration } from "./constants";
+import {
+  CurrentMaxOnboardingVersion,
+  TurndownConfiguration,
+} from "./constants";
 import MentionNotice from "./components/MentionNotice";
+import { LinearProgress, NativeSelect, Paper } from "@mui/material";
+import MouseOverChip from "./components/MouseOverChip";
 
-const Popup = () => {
-  const [status, setStatus] = useState<AlertStatus>();
+const Draggable: any = DraggableRaw;
 
-  const [sandboxReady, setSandboxReady] = useState<boolean>(false);
-  const [obsidianUnavailable, setObsidianUnavailable] =
-    useState<boolean>(false);
-  const [ready, setReady] = useState<boolean>(false);
-  const [cacheData, setCacheData] = useState<ContentCache>({});
-  const [cacheAvailable, setCacheAvailable] = useState<boolean>(false);
+declare const BUILD_ID: string;
+declare global {
+  interface Window {
+    ObsidianWeb: {
+      showPopUp: () => void;
+      showPopUpMessage: () => void;
+      hidePopUp: () => void;
+      togglePopUp: () => void;
+      destroyPopUp: () => void;
+    };
+  }
+  interface WindowEventMap {
+    "obsidian-web": CustomEvent;
+  }
+}
 
-  const [apiKey, setApiKey] = useState<string>("");
-  const [insecureMode, setInsecureMode] = useState<boolean>(false);
+const ROOT_CONTAINER_ID = `obsidian-web-container-${BUILD_ID}`;
 
-  const [url, setUrl] = useState<string>("");
-  const [title, setTitle] = useState<string>("");
-  const [selection, setSelection] = useState<string>("");
-  const [pageContent, setPageContent] = useState<string>("");
+if (!document.getElementById(ROOT_CONTAINER_ID)) {
+  function dispatchObsidianWebMessage(action: string, data?: any): void {
+    const evt = new CustomEvent("obsidian-web", {
+      detail: { action, data },
+    });
+    window.dispatchEvent(evt);
+  }
 
-  const [suggestionAccepted, setSuggestionAccepted] = useState<boolean>(false);
-  const [mentions, setMentions] = useState<SearchJsonResponseItem[]>([]);
-  const [directReferences, setDirectReferences] = useState<
-    SearchJsonResponseItem[]
-  >([]);
-  const [directReferenceMessages, setDirectReferenceMessages] = useState<
-    string[]
-  >([]);
+  window.ObsidianWeb = {
+    showPopUp: () => {
+      dispatchObsidianWebMessage("show-popup");
+    },
+    showPopUpMessage: () => {
+      dispatchObsidianWebMessage("show-popup-message");
+    },
+    hidePopUp: () => {
+      dispatchObsidianWebMessage("hide-popup");
+    },
+    togglePopUp: () => {
+      dispatchObsidianWebMessage("toggle-popup");
+    },
+    destroyPopUp: () => {
+      dispatchObsidianWebMessage("destroy-popup");
+    },
+  };
 
-  const [searchEnabled, setSearchEnabled] = useState<boolean>(false);
-  const [searchMatchMentionTemplate, setSearchMatchMentionTemplate] =
-    useState<string>("");
-  const [searchMatchDirectTemplate, setSearchMatchDirectTemplate] =
-    useState<string>("");
+  interface Props {
+    sandbox: HTMLIFrameElement;
+  }
 
-  const [method, setMethod] = useState<OutputPreset["method"]>("post");
-  const [overrideUrl, setOverrideUrl] = useState<string>();
-  const [compiledUrl, setCompiledUrl] = useState<string>("");
-  const [headers, setHeaders] = useState<Record<string, string>>({});
-  const [compiledContent, setCompiledContent] = useState<string>("");
+  window.addEventListener("message", compileTemplateCallback, {
+    signal: compileTemplateCallbackController.signal,
+  });
 
-  const [presets, setPresets] = useState<OutputPreset[]>([]);
-  const [selectedPreset, setSelectedPreset] = useState<number>(0);
+  const Popup: React.FunctionComponent<Props> = ({ sandbox }) => {
+    const [status, setStatus] = useState<AlertStatus>();
 
-  const turndown = new Turndown(TurndownConfiguration);
+    const [sandboxReady, setSandboxReady] = useState<boolean>(false);
+    const [obsidianUnavailable, setObsidianUnavailable] = useState<boolean>();
 
-  useEffect(() => {
-    window.addEventListener(
-      "message",
-      () => {
-        setSandboxReady(true);
-      },
-      {
-        once: true,
-      }
+    const [apiUrl, setApiUrl] = useState<string | null>(null);
+
+    const [host, setHost] = useState<string | null>(null);
+    const [hasHostPermission, setHasHostPermission] = useState<boolean | null>(
+      null
     );
-  }, []);
+    const [apiKey, setApiKey] = useState<string>();
+    const [insecureMode, setInsecureMode] = useState<boolean>(false);
 
-  useEffect(() => {
-    if (!apiKey) {
-      return;
+    const [suggestionAccepted, setSuggestionAccepted] =
+      useState<boolean>(false);
+    const [mentions, setMentions] = useState<SearchJsonResponseItem[]>([]);
+    const [directReferences, setDirectReferences] = useState<
+      SearchJsonResponseItemWithMetadata[]
+    >([]);
+
+    const [searchEnabled, setSearchEnabled] = useState<boolean>(false);
+    const [searchMatchMentionTemplate, setSearchMatchMentionTemplate] =
+      useState<OutputPreset>();
+    const [searchMatchDirectTemplate, setSearchMatchDirectTemplate] =
+      useState<OutputPreset>();
+    const [searchMatchTemplate, setSearchMatchtemplate] =
+      useState<UrlOutputPreset>();
+    const [hoverEnabled, setHoverEnabled] = useState<boolean>(false);
+
+    const [presets, setPresets] = useState<UrlOutputPreset[]>();
+    const [selectedPresetIdx, setSelectedPresetIdx] = useState<number>(0);
+    const [selectedPreset, setSelectedPreset] = useState<UrlOutputPreset>();
+
+    const [formMethod, setFormMethod] =
+      useState<UrlOutputPreset["method"]>("post");
+    const [formUrl, setFormUrl] = useState<string>("");
+    const [formHeaders, setFormHeaders] = useState<Record<string, any>>({});
+    const [formContent, setFormContent] = useState<string>("");
+
+    const [originalFormState, setOriginalFormState] = useState<FormState>();
+
+    const [compiledUrl, setCompiledUrl] = useState<string>("");
+    const [compiledContent, setCompiledContent] = useState<string>("");
+    const [contentIsValid, setContentIsValid] = useState<boolean>(false);
+
+    const [popupDisplayed, setPopupDisplayed] = useState<boolean>(false);
+    const [popupFormDisplayed, setPopupFormDisplayed] =
+      useState<boolean>(false);
+
+    const [onboardedToVersion, setOnboardedToVersion] = useState<string>("");
+
+    const [previewContextProcessing, setPreviewContextProcessing] =
+      useState<boolean>(false);
+    const [pageUrl, setPageUrl] = useState<string>(window.location.href);
+
+    const [displayState, setDisplayState] = useState<
+      "welcome" | "form" | "error" | "loading" | "alert" | "permission"
+    >("loading");
+
+    const turndown = new Turndown(TurndownConfiguration);
+    turndown.use(gfm);
+
+    const formStateMatches = React.useCallback(
+      (originalState: FormState, currentState: FormState) => {
+        return (
+          originalState.method === currentState.method &&
+          originalState.url === currentState.url &&
+          JSON.stringify(originalState.headers) ===
+            JSON.stringify(currentState.headers) &&
+          originalState.content === currentState.content
+        );
+      },
+      []
+    );
+
+    useEffect(() => {
+      if (
+        apiKey === undefined ||
+        hasHostPermission === null ||
+        obsidianUnavailable === undefined
+      ) {
+        setDisplayState("loading");
+        return;
+      }
+      if (apiKey !== undefined && apiKey.length === 0) {
+        setDisplayState("welcome");
+        return;
+      }
+      if (hasHostPermission != null && !hasHostPermission) {
+        setDisplayState("permission");
+        return;
+      }
+      if (status) {
+        setDisplayState("alert");
+        return;
+      }
+      if (obsidianUnavailable) {
+        setDisplayState("error");
+        return;
+      }
+      setDisplayState("form");
+    }, [status, apiKey, obsidianUnavailable, hasHostPermission]);
+
+    useEffect(() => {
+      if (!selectedPreset) {
+        return;
+      }
+
+      setFormMethod(selectedPreset.method);
+      setFormUrl(selectedPreset.urlTemplate);
+      setFormHeaders(selectedPreset.headers);
+      setFormContent(selectedPreset.contentTemplate);
+
+      setOriginalFormState({
+        method: selectedPreset.method,
+        url: selectedPreset.urlTemplate,
+        headers: selectedPreset.headers,
+        content: selectedPreset.contentTemplate,
+      });
+    }, [selectedPreset]);
+
+    const [mouseOverTarget, setMouseOverTarget] = useState<HTMLAnchorElement>();
+    const [mousePosition, setMousePosition] = useState<{
+      x: number;
+      y: number;
+    }>();
+    const [mouseOverMentions, setMouseOverMentions] =
+      useState<UrlMentionContainer>();
+
+    const mouseOverHandler = (event: MouseEvent) => {
+      if ((event.target as HTMLElement).tagName === "A") {
+        setMouseOverTarget(event.target as HTMLAnchorElement);
+        setMousePosition({
+          x: event.clientX,
+          y: event.clientY,
+        });
+        setMouseOverMentions(undefined);
+        (event.target as HTMLElement).addEventListener("mouseout", (event) => {
+          setMouseOverTarget(undefined);
+          setMousePosition(undefined);
+          setMouseOverMentions(undefined);
+        });
+      }
+    };
+
+    function handleEscapeKey(event: KeyboardEvent) {
+      if (event.code === "Escape") {
+        onFinished();
+      }
     }
 
-    async function handle() {
+    useEffect(() => {
+      async function handler() {
+        if (
+          mouseOverTarget &&
+          mouseOverTarget.href &&
+          window.location.href !== mouseOverTarget.href
+        ) {
+          const url = new URL(mouseOverTarget.href, window.location.href).href;
+          const mentions = await getUrlMentions(url);
+          setMouseOverMentions(mentions);
+        }
+      }
+
+      handler();
+    }, [mouseOverTarget]);
+
+    useEffect(() => {
+      if (hoverEnabled) {
+        document.body.addEventListener("mouseover", mouseOverHandler);
+        document.addEventListener("keydown", handleEscapeKey);
+      }
+
+      return () => {
+        if (hoverEnabled) {
+          document.body.removeEventListener("mouseover", mouseOverHandler);
+          document.removeEventListener("keydown", handleEscapeKey);
+        }
+      };
+    }, [hoverEnabled]);
+
+    const onSandboxMessage = (message: MessageEvent<any>) => {
+      if (
+        message.data.source === "obsidian-web-sandbox" &&
+        message.data.success === true
+      ) {
+        setSandboxReady(true);
+      }
+    };
+
+    const onObsidianWebMessage = (evt: CustomEvent<any>) => {
+      if (evt.detail.action === "show-popup") {
+        setPopupDisplayed(true);
+        setPopupFormDisplayed(true);
+      } else if (evt.detail.action === "show-popup-message") {
+        setPopupDisplayed(true);
+      } else if (evt.detail.action === "hide-popup") {
+        setPopupDisplayed(false);
+      } else if (evt.detail.action === "toggle-popup") {
+        setPopupFormDisplayed((value) => {
+          setPopupDisplayed(!value);
+          return !value;
+        });
+      } else if (evt.detail.action === "show-message") {
+        setPopupDisplayed(true);
+      } else {
+        console.error("Obsidian Web received unexpected event!", evt);
+      }
+    };
+
+    const handleUrlChange = (): void => {
+      if (pageUrl !== window.location.href) {
+        setPageUrl(window.location.href);
+      }
+    };
+
+    useEffect(() => {
+      window.addEventListener("message", onSandboxMessage);
+      window.addEventListener("obsidian-web", onObsidianWebMessage);
+      window.addEventListener("popstate", handleUrlChange);
+      window.addEventListener("hashchange", handleUrlChange);
+
+      const timer = window.setInterval(handleUrlChange, 1000);
+
+      return () => {
+        window.removeEventListener("message", onSandboxMessage);
+        window.removeEventListener("obsidian-web", onObsidianWebMessage);
+        window.removeEventListener("popstate", handleUrlChange);
+        window.removeEventListener("hashchange", handleUrlChange);
+
+        window.clearInterval(timer);
+      };
+    }, []);
+
+    const checkIfObsidianIsAvailable = async (): Promise<void> => {
       try {
-        const request = await obsidianRequest(
-          apiKey,
-          "/",
-          { method: "get" },
-          insecureMode
-        );
-        const result: StatusResponse = await request.json();
+        if (!apiUrl) {
+          throw new Error("No API URL configured");
+        }
+
+        const request = await obsidianRequest("/", { method: "get" });
+        const jsonData = request.data;
+        if (!jsonData) {
+          setObsidianUnavailable(true);
+          return;
+        }
+
+        const result = jsonData as StatusResponse;
         if (
           result.status === "OK" &&
+          result.authenticated &&
           result.service.includes("Obsidian Local REST API")
         ) {
           setObsidianUnavailable(false);
@@ -126,12 +373,15 @@ const Popup = () => {
       } catch (e) {
         setObsidianUnavailable(true);
       }
-    }
-    handle();
-  }, [apiKey]);
+    };
 
-  useEffect(() => {
-    async function handle() {
+    useEffect(() => {
+      if (popupDisplayed && apiKey) {
+        checkIfObsidianIsAvailable();
+      }
+    }, [apiKey, popupDisplayed]);
+
+    const fetchAndLoadSettings = async (): Promise<void> => {
       let syncSettings: ExtensionSyncSettings;
       let localSettings: ExtensionLocalSettings;
 
@@ -153,449 +403,601 @@ const Popup = () => {
         setStatus({
           severity: "error",
           title: "Error",
-          message: "Could not get settings!",
+          message: "Could not get sync settings!",
         });
         return;
       }
 
-      setInsecureMode(localSettings.insecureMode ?? false);
+      setApiUrl(localSettings.url);
       setApiKey(localSettings.apiKey);
-      setSearchEnabled(syncSettings.searchEnabled);
-      setSearchMatchMentionTemplate(syncSettings.searchMatchMentionTemplate);
-      setSearchMatchDirectTemplate(syncSettings.searchMatchDirectTemplate);
-    }
-    handle();
-  }, []);
-
-  useEffect(() => {
-    if (!url) {
-      return;
-    }
-
-    async function handle() {
-      const cache = await getContentCache(chrome.storage.local);
-      if (cache) {
-        setCacheData(cache);
-        try {
-          if (
-            cache.url &&
-            normalizeCacheUrl(cache.url) === normalizeCacheUrl(url)
-          ) {
-            setCacheAvailable(true);
-            setSelectedPreset(-1);
-          }
-        } catch (e) {
-          setCacheData({});
-          setCacheAvailable(false);
-        }
+      setSearchEnabled(syncSettings.searchMatch.enabled);
+      if (syncSettings.searchMatch.mentions.suggestionEnabled) {
+        setSearchMatchMentionTemplate(
+          syncSettings.searchMatch.mentions.template
+        );
+      } else {
+        setSearchMatchMentionTemplate(undefined);
       }
-    }
+      if (syncSettings.searchMatch.direct.suggestionEnabled) {
+        setSearchMatchDirectTemplate(syncSettings.searchMatch.direct.template);
+      } else {
+        setSearchMatchDirectTemplate(undefined);
+      }
+      if (syncSettings.searchMatch.enabled) {
+        setHoverEnabled(syncSettings.searchMatch.hoverEnabled);
+      } else {
+        setHoverEnabled(false);
+      }
+      setOnboardedToVersion(syncSettings.onboardedToVersion);
+    };
 
-    handle();
-  }, [url]);
+    useEffect(() => {
+      fetchAndLoadSettings();
+    }, [popupDisplayed]);
 
-  useEffect(() => {
-    async function handle() {
-      let tab: chrome.tabs.Tab;
-      try {
-        const tabs = await chrome.tabs.query({
-          active: true,
-          currentWindow: true,
+    useEffect(() => {
+      if (apiUrl) {
+        checkHasHostPermission(apiUrl).then((hasPermission) => {
+          setHasHostPermission(hasPermission);
         });
-        tab = tabs[0];
-      } catch (e) {
-        setStatus({
-          severity: "error",
-          title: "Error",
-          message: "Could not get current tab!",
-        });
-        return;
       }
-      if (!tab.id) {
-        return;
-      }
+    }, [apiUrl]);
 
+    const [previewContext, setPreviewContext] =
+      React.useState<Record<string, any>>();
+
+    function preventBrowserFromStealingKeypress(event: KeyboardEvent) {
+      if (event.code !== "Escape") {
+        event.stopPropagation();
+      }
+    }
+
+    useEffect(() => {
+      if (popupDisplayed && popupFormDisplayed) {
+        updatePreviewContext();
+        document.addEventListener(
+          "keydown",
+          preventBrowserFromStealingKeypress,
+          true
+        );
+      } else {
+        document.removeEventListener(
+          "keydown",
+          preventBrowserFromStealingKeypress,
+          true
+        );
+      }
+      return () => {
+        document.removeEventListener(
+          "keydown",
+          preventBrowserFromStealingKeypress,
+          true
+        );
+      };
+    }, [popupDisplayed, popupFormDisplayed, pageUrl]);
+
+    async function updatePreviewContext(): Promise<void> {
+      setPreviewContextProcessing(true);
       let selectedText: string;
       try {
-        const selectedTextInjected = await chrome.scripting.executeScript({
-          target: { tabId: tab.id },
-          func: () => {
-            const selection = window.getSelection();
-            if (!selection) {
-              return "";
-            }
-            const contents = selection.getRangeAt(0).cloneContents();
-            const node = document.createElement("div");
-            node.appendChild(contents.cloneNode(true));
-            return node.innerHTML;
-          },
-        });
-        selectedText = htmlToMarkdown(
-          selectedTextInjected[0].result,
-          tab.url ?? ""
+        const selectionReadability = htmlToReadabilityData(
+          getWindowSelectionAsHtml(),
+          window.document.location.href
         );
+        selectedText = readabilityDataToMarkdown(selectionReadability);
       } catch (e) {
         selectedText = "";
       }
 
-      let pageContent: string;
+      const newPreviewContext: PreviewContext = {
+        page: {
+          url: window.document.location.href ?? "",
+          title: window.document.title ?? "",
+          selectedText: selectedText,
+          content: "",
+        },
+        article: {},
+      };
+
       try {
-        const pageContentInjected = await chrome.scripting.executeScript({
-          target: { tabId: tab.id },
-          func: () => window.document.body.innerHTML,
-        });
-        pageContent = htmlToMarkdown(
-          pageContentInjected[0].result,
-          tab.url ?? ""
+        const pageReadability = htmlToReadabilityData(
+          window.document.body.innerHTML,
+          window.document.location.href
         );
-      } catch (e) {
-        pageContent = "";
+        if (pageReadability) {
+          newPreviewContext.article = {
+            title: pageReadability.title,
+            length: pageReadability.length,
+            excerpt: pageReadability.excerpt,
+            byline: pageReadability.byline,
+            dir: pageReadability.dir,
+            siteName: pageReadability.siteName,
+          };
+        } else {
+          newPreviewContext.article = {};
+        }
+        newPreviewContext.page.content =
+          readabilityDataToMarkdown(pageReadability);
+      } catch (e) {}
+
+      setPreviewContext(newPreviewContext);
+      setPreviewContextProcessing(false);
+    }
+
+    useEffect(() => {
+      if (!searchEnabled || !popupDisplayed) {
+        return;
       }
 
-      setUrl(tab.url ?? "");
-      setTitle(tab.title ?? "");
-      setSelection(selectedText);
-      setPageContent(pageContent);
-    }
-    handle();
-  }, []);
+      async function handle() {
+        if (!apiUrl) {
+          return;
+        }
+        const allMentions = await getUrlMentions(window.location.href);
 
-  useEffect(() => {
-    setDirectReferenceMessages([]);
-
-    async function handle() {
-      const messages: string[] = [];
-
-      for (const ref of directReferences) {
-        const meta = await getPageMetadata(apiKey, insecureMode, ref.filename);
-
-        if (typeof meta.frontmatter["web-badge-message"] === "string") {
-          messages.push(meta.frontmatter["web-badge-message"]);
+        setMentions(allMentions.mentions);
+        setDirectReferences(allMentions.direct);
+        if (allMentions.count === 0) {
+          if (popupDisplayed && !popupFormDisplayed) {
+            setPopupDisplayed(false);
+          }
         }
       }
 
-      setDirectReferenceMessages(messages);
-    }
-
-    handle();
-  }, [directReferences]);
-
-  useEffect(() => {
-    if (!searchEnabled) {
-      return;
-    }
-
-    async function handle() {
-      const allMentions = await getUrlMentions(apiKey, insecureMode, url);
-
-      setMentions(allMentions.mentions);
-      setDirectReferences(allMentions.direct);
-    }
-
-    handle();
-  }, [url]);
-
-  useEffect(() => {
-    if (!sandboxReady) {
-      return;
-    }
-
-    async function handle() {
-      const preset = presets[selectedPreset];
-
-      const context = {
-        page: {
-          url: url,
-          title: title,
-          selectedText: selection,
-          content: pageContent,
-        },
-      };
-
-      if (overrideUrl) {
-        setCompiledUrl(overrideUrl);
-        setOverrideUrl(undefined);
-      } else {
-        const compiledUrl = await compileTemplate(preset.urlTemplate, context);
-        setCompiledUrl(compiledUrl);
-      }
-      const compiledContent = await compileTemplate(
-        preset.contentTemplate,
-        context
-      );
-
-      setMethod(preset.method as OutputPreset["method"]);
-      setHeaders(preset.headers);
-      setCompiledContent(compiledContent);
-      setReady(true);
-    }
-
-    if (selectedPreset === -1) {
-      if (cacheData.method) {
-        setMethod(cacheData.method);
-      }
-      if (cacheData.compiledUrl) {
-        setCompiledUrl(cacheData.compiledUrl);
-      }
-      if (cacheData.headers) {
-        setHeaders(cacheData.headers);
-      }
-      if (cacheData.compiledContent) {
-        setCompiledContent(cacheData.compiledContent);
-      }
-      setReady(true);
-    } else {
       handle();
-    }
-  }, [
-    sandboxReady,
-    selectedPreset,
-    presets,
-    url,
-    title,
-    selection,
-    pageContent,
-  ]);
+    }, [pageUrl, searchEnabled, popupDisplayed]);
 
-  useEffect(() => {
-    if (!url) {
-      return;
-    }
+    useEffect(() => {
+      if (!sandboxReady || presets === undefined) {
+        return;
+      }
+      let preset: UrlOutputPreset;
+      if (selectedPresetIdx === -2 && searchMatchTemplate) {
+        preset = searchMatchTemplate;
+      } else {
+        preset = presets[selectedPresetIdx];
+      }
 
-    setContentCache(chrome.storage.local, {
-      url,
-      method,
-      compiledUrl,
-      headers,
-      compiledContent,
-    });
-  }, [url, method, compiledUrl, headers, compiledContent]);
+      setSelectedPreset(preset);
+    }, [sandboxReady, presets, selectedPresetIdx]);
 
-  const htmlToMarkdown = (html: string, baseUrl: string): string => {
-    const tempDoc = document.implementation.createHTMLDocument();
-    const base = tempDoc.createElement("base");
-    base.href = baseUrl;
-    tempDoc.head.append(base);
-    tempDoc.body.innerHTML = html;
-    const reader = new Readability(tempDoc);
-    const parsed = reader.parse();
-    if (parsed) {
-      return turndown.turndown(parsed.content);
-    }
-    return "";
-  };
-
-  const sendToObsidian = async () => {
-    const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-    const tab = tabs[0];
-
-    if (!tab.id) {
-      return;
-    }
-
-    const requestHeaders = {
-      ...headers,
-      "Content-Type": "text/markdown",
+    const htmlToReadabilityData = (
+      html: string,
+      baseUrl: string
+    ): ReturnType<Readability["parse"]> => {
+      const tempDoc = document.implementation.createHTMLDocument();
+      const base = tempDoc.createElement("base");
+      base.href = baseUrl;
+      tempDoc.head.append(base);
+      tempDoc.body.innerHTML = html;
+      const reader = new Readability(tempDoc);
+      return reader.parse();
     };
-    const request: RequestInit = {
-      method: method,
-      body: compiledContent,
-      headers: requestHeaders,
-    };
-    let result: Response;
-    try {
-      result = await obsidianRequest(
-        apiKey,
-        compiledUrl,
-        request,
-        insecureMode
-      );
-    } catch (e) {
-      setStatus({
-        severity: "error",
-        title: "Error",
-        message: `Could not send content to Obsidian: ${e}`,
-      });
-      return;
-    }
-    const text = await result.text();
 
-    if (result.status < 300) {
-      setStatus({
-        severity: "success",
-        title: "All done!",
-        message: "Your content was sent to Obsidian successfully.",
-      });
-      setTimeout(() => window.close(), 2000);
-    } else {
+    const readabilityDataToMarkdown = (
+      data: ReturnType<Readability["parse"]>
+    ): string => {
+      if (data) {
+        return turndown.turndown(data.content);
+      }
+      return "";
+    };
+
+    const sendToObsidian = async () => {
+      const requestHeaders = {
+        ...formHeaders,
+        "Content-Type": "text/markdown",
+      };
+      const request: RequestInit = {
+        method: formMethod,
+        body: compiledContent,
+        headers: requestHeaders,
+      };
+      let result: ObsidianResponse;
+
+      if (apiUrl === null) {
+        console.error("Cannot send to Obsidian; no hostname set.");
+        return;
+      }
+
       try {
-        const body = JSON.parse(text);
-        setStatus({
-          severity: "error",
-          title: "Error",
-          message: `Could not send content to Obsidian: (Error Code ${body.errorCode}) ${body.message}`,
-        });
+        result = await obsidianRequest(compiledUrl, request);
       } catch (e) {
         setStatus({
           severity: "error",
           title: "Error",
-          message: `Could not send content to Obsidian!: (Status Code ${result.status}) ${text}`,
+          message: `Could not send content to Obsidian: ${e}`,
+          recoverable: true,
         });
+        return;
       }
-    }
-  };
 
-  const acceptSuggestion = (filename: string, template: string) => {
-    const matchingPresetIdx = presets.findIndex(
-      (preset) => preset.name === template
-    );
-    setOverrideUrl(`/vault/${filename}`);
-    setSelectedPreset(matchingPresetIdx);
-    setSuggestionAccepted(true);
-  };
+      if (result.status < 300) {
+        setStatus({
+          severity: "success",
+          title: "All done!",
+          message: "Your content was sent to Obsidian successfully.",
+        });
+        setTimeout(() => onFinished(true), 1500);
+      } else {
+        try {
+          const body = result.data ?? {};
+          setStatus({
+            severity: "error",
+            title: "Error",
+            message: `Could not send content to Obsidian: (Error Code ${body.errorCode}) ${body.message}`,
+            recoverable: true,
+          });
+        } catch (e) {
+          setStatus({
+            severity: "error",
+            title: "Error",
+            message: `Could not send content to Obsidian!: (Status Code ${result.status}) ${result.data}`,
+            recoverable: true,
+          });
+        }
+      }
+    };
 
-  return (
-    <ThemeProvider theme={PurpleTheme}>
-      {ready && !status && !obsidianUnavailable && (
-        <>
-          {apiKey.length === 0 && (
-            <>
-              <MaterialAlert severity="success">
-                Thanks for installing Obsidian Web! Obsidian Web needs some
-                information from you before it can connect to your Obsidian
-                instance.
-                <Button onClick={() => chrome.runtime.openOptionsPage()}>
-                  Go to settings
-                </Button>
-              </MaterialAlert>
-            </>
+    const acceptSuggestion = async (
+      filename: string,
+      template: OutputPreset
+    ) => {
+      if (presets === undefined) {
+        throw new Error(
+          "Unexpectedly had no presets when accepting suggestion"
+        );
+      }
+      setPopupFormDisplayed(true);
+      setSearchMatchtemplate({
+        name: "",
+        urlTemplate: `/vault/${filename}`,
+        method: template.method,
+        headers: template.headers,
+        contentTemplate: template.contentTemplate,
+      });
+      setSelectedPresetIdx(-2);
+
+      setSuggestionAccepted(true);
+    };
+
+    const hasNoUnsavedChangesOrConfirmed = (): boolean => {
+      return Boolean(
+        !originalFormState ||
+          formStateMatches(originalFormState, {
+            method: formMethod,
+            url: formUrl,
+            headers: formHeaders,
+            content: formContent,
+          }) ||
+          window.confirm(
+            "You have unsaved changes; if you continue, those changes will be lost!  Continue?"
+          )
+      );
+    };
+
+    const onFinished = (force?: boolean) => {
+      if (force || hasNoUnsavedChangesOrConfirmed()) {
+        setPopupFormDisplayed(false);
+        setPopupDisplayed(false);
+        setStatus(undefined);
+      }
+    };
+
+    return (
+      <ThemeProvider theme={DarkPurpleTheme}>
+        {mouseOverTarget &&
+          mousePosition &&
+          mouseOverMentions &&
+          mouseOverMentions.count > 0 && (
+            <MouseOverChip
+              mousePosition={mousePosition}
+              mentions={mouseOverMentions}
+            />
           )}
-          {apiKey && (
-            <>
-              <div className="option">
-                <div className="option-value">
-                  <Select
-                    label="Preset"
-                    value={selectedPreset}
-                    fullWidth={true}
-                    onChange={(event) =>
-                      setSelectedPreset(
-                        typeof event.target.value === "number"
-                          ? event.target.value
-                          : parseInt(event.target.value, 10)
-                      )
-                    }
-                  >
-                    {cacheAvailable && (
-                      <MenuItem key={"cached"} value={-1}>
-                        <i>Saved Draft</i>
-                      </MenuItem>
+        <div
+          className="obsidian-web-popup"
+          title="Double-click to dismiss"
+          onDoubleClick={() => onFinished()}
+        >
+          {popupDisplayed && (
+            <Draggable handle=".drag-handle">
+              <div className="popup">
+                <div className="drag-handle"></div>
+                <Paper
+                  onClick={(evt) => {
+                    evt.stopPropagation();
+                  }}
+                >
+                  {onboardedToVersion &&
+                    compareVersions(onboardedToVersion, "0.0") > 0 &&
+                    compareVersions(
+                      onboardedToVersion,
+                      CurrentMaxOnboardingVersion
+                    ) < 0 && (
+                      <MaterialAlert severity="success">
+                        <p className="popup-text">
+                          New features were added as part of the latest version
+                          of Obsidian Web that make it even more useful!
+                        </p>
+                        <div className="submit">
+                          <Button
+                            target="_blank"
+                            variant="contained"
+                            href={`chrome-extension://${chrome.runtime.id}/options.html`}
+                          >
+                            See what's new (opens new window)
+                          </Button>
+                        </div>
+                      </MaterialAlert>
                     )}
-                    {presets.map((preset, idx) => (
-                      <MenuItem key={preset.name} value={idx}>
-                        {preset.name}
-                      </MenuItem>
-                    ))}
-                  </Select>
-                  <IconButton
-                    className="send-to-obsidian"
-                    color="primary"
-                    size="large"
-                    disabled={!ready}
-                    onClick={sendToObsidian}
-                    title="Send to Obsidian"
-                  >
-                    <SendIcon />
-                  </IconButton>
-                </div>
-              </div>
-              <Accordion>
-                <AccordionSummary expandIcon={<ExpandMoreIcon />}>
-                  <Typography>Entry Details</Typography>
-                </AccordionSummary>
-                <AccordionDetails>
-                  <RequestParameters
-                    method={method}
-                    url={compiledUrl}
-                    headers={headers}
-                    content={compiledContent}
-                    onChangeMethod={setMethod}
-                    onChangeUrl={setCompiledUrl}
-                    onChangeHeaders={setHeaders}
-                    onChangeContent={setCompiledContent}
-                  />
-                </AccordionDetails>
-              </Accordion>
-              {!suggestionAccepted && (
-                <>
-                  {(mentions.length > 0 || directReferences.length > 0) && (
-                    <div className="mentions">
-                      {directReferences.map((ref) => (
-                        <MentionNotice
-                          key={ref.filename}
-                          type="direct"
-                          apiKey={apiKey}
-                          insecureMode={insecureMode}
-                          templateSuggestion={searchMatchDirectTemplate}
-                          mention={ref}
-                          presets={presets}
-                          acceptSuggestion={acceptSuggestion}
-                          directReferenceMessages={directReferenceMessages}
-                        />
-                      ))}
-                      {mentions
-                        .filter(
-                          (ref) =>
-                            !directReferences.find(
-                              (d) => d.filename === ref.filename
-                            )
-                        )
-                        .map((ref) => (
-                          <MentionNotice
-                            key={ref.filename}
-                            type="mention"
-                            apiKey={apiKey}
-                            insecureMode={insecureMode}
-                            templateSuggestion={searchMatchMentionTemplate}
-                            mention={ref}
-                            presets={presets}
-                            acceptSuggestion={acceptSuggestion}
-                            directReferenceMessages={directReferenceMessages}
-                          />
-                        ))}
+                  {displayState === "welcome" && (
+                    <>
+                      <MaterialAlert severity="success">
+                        <p className="popup-text">
+                          Thanks for installing Obsidian Web! Obsidian Web needs
+                          some information from you before it can connect to
+                          your Obsidian instance.
+                        </p>
+                        <div className="submit">
+                          <Button
+                            target="_blank"
+                            variant="contained"
+                            href={`chrome-extension://${chrome.runtime.id}/options.html`}
+                          >
+                            Go to settings
+                          </Button>
+                        </div>
+                      </MaterialAlert>
+                    </>
+                  )}
+                  {displayState === "permission" && apiUrl && (
+                    <MaterialAlert severity="warning" style={{ flexGrow: 1 }}>
+                      <p className="popup-text">
+                        Obsidian Web needs permission to access Obsidian at '
+                        {apiUrl}
+                        '.
+                      </p>
+                      <div className="submit">
+                        <Button
+                          target="_blank"
+                          variant="outlined"
+                          href={`chrome-extension://${chrome.runtime.id}/options.html`}
+                        >
+                          Go to settings
+                        </Button>
+                        <Button
+                          variant="contained"
+                          onClick={() => {
+                            requestHostPermission(apiUrl).then((result) => {
+                              setHasHostPermission(result);
+                            });
+                          }}
+                        >
+                          Grant
+                        </Button>
+                      </div>
+                    </MaterialAlert>
+                  )}
+                  {displayState === "alert" && status && (
+                    <Alert value={status}>
+                      {status.recoverable && (
+                        <div className="submit">
+                          <Button
+                            variant="contained"
+                            onClick={() => setStatus(undefined)}
+                          >
+                            Back
+                          </Button>
+                        </div>
+                      )}
+                    </Alert>
+                  )}
+                  {displayState === "error" && (
+                    <MaterialAlert severity="error">
+                      <p className="popup-text">
+                        Could not connect to Obsidian! Make sure Obsidian is
+                        running, that the Obsidian Local REST API plugin is
+                        enabled, and that Obsidian Web is configured with the
+                        correct API Key.
+                      </p>
+                      <div className="submit">
+                        <Button
+                          target="_blank"
+                          variant="outlined"
+                          href={`chrome-extension://${chrome.runtime.id}/options.html`}
+                        >
+                          Go to settings
+                        </Button>
+                        <Button
+                          variant="contained"
+                          onClick={() => checkIfObsidianIsAvailable()}
+                        >
+                          Retry
+                        </Button>
+                      </div>
+                    </MaterialAlert>
+                  )}
+                  {displayState === "loading" && (
+                    <div className="loading">
+                      {" "}
+                      <LinearProgress />
                     </div>
                   )}
-                </>
-              )}
-            </>
+                  {displayState === "form" && (
+                    <>
+                      {apiUrl && (
+                        <>
+                          {(mentions.length > 0 ||
+                            directReferences.length > 0) && (
+                            <div className="mentions">
+                              {directReferences.map((ref) => (
+                                <MentionNotice
+                                  key={ref.filename}
+                                  type="direct"
+                                  templateSuggestion={searchMatchDirectTemplate}
+                                  mention={ref}
+                                  acceptSuggestion={acceptSuggestion}
+                                />
+                              ))}
+                              {mentions
+                                .filter(
+                                  (ref) =>
+                                    !directReferences.find(
+                                      (d) => d.filename === ref.filename
+                                    )
+                                )
+                                .map((ref) => (
+                                  <MentionNotice
+                                    key={ref.filename}
+                                    type="mention"
+                                    templateSuggestion={
+                                      searchMatchMentionTemplate
+                                    }
+                                    mention={ref}
+                                    acceptSuggestion={acceptSuggestion}
+                                  />
+                                ))}
+                            </div>
+                          )}
+                        </>
+                      )}
+                      {popupFormDisplayed && (
+                        <>
+                          {(previewContextProcessing || !previewContext) && (
+                            <LinearProgress />
+                          )}
+                          <div className="option">
+                            <div className="option-value">
+                              <NativeSelect
+                                autoFocus={true}
+                                className="preset-selector"
+                                value={selectedPresetIdx}
+                                fullWidth={true}
+                                onChange={(event) => {
+                                  console.log(
+                                    `Changing preset to ${event.target.value}`
+                                  );
+                                  if (hasNoUnsavedChangesOrConfirmed()) {
+                                    setSelectedPresetIdx(
+                                      typeof event.target.value === "number"
+                                        ? event.target.value
+                                        : parseInt(event.target.value, 10)
+                                    );
+                                  }
+                                }}
+                              >
+                                {suggestionAccepted && searchMatchTemplate && (
+                                  <option key={"___suggestion"} value={-2}>
+                                    [Suggested Template]
+                                  </option>
+                                )}
+                                {presets &&
+                                  presets.map((preset, idx) => (
+                                    <option key={preset.name} value={idx}>
+                                      {preset.name}
+                                    </option>
+                                  ))}
+                              </NativeSelect>
+                              <IconButton
+                                className="send-to-obsidian"
+                                color="primary"
+                                size="large"
+                                disabled={!contentIsValid || !previewContext}
+                                onClick={sendToObsidian}
+                                title="Send to Obsidian"
+                              >
+                                <SendIcon className="send-to-obsidian-icon" />
+                              </IconButton>
+                            </div>
+                          </div>
+                          <Accordion>
+                            <AccordionSummary expandIcon={<ExpandMoreIcon />}>
+                              <p>View Request Details</p>
+                            </AccordionSummary>
+                            <AccordionDetails>
+                              <RequestParameters
+                                method={formMethod}
+                                url={formUrl}
+                                sandbox={sandbox}
+                                headers={formHeaders}
+                                previewContext={previewContext ?? {}}
+                                content={formContent}
+                                onChangeMethod={setFormMethod}
+                                onChangeUrl={setFormUrl}
+                                onChangeHeaders={setFormHeaders}
+                                onChangeContent={setFormContent}
+                                onChangeIsValid={setContentIsValid}
+                                onChangeRenderedContent={setCompiledContent}
+                                onChangeRenderedUrl={setCompiledUrl}
+                                showCrystalizeOption={true}
+                              />
+                            </AccordionDetails>
+                          </Accordion>
+                        </>
+                      )}
+                      {!popupFormDisplayed && (
+                        <IconButton
+                          onClick={() => setPopupFormDisplayed(true)}
+                          className="show-form-cta"
+                          aria-label="Show form"
+                          title="Show form"
+                        >
+                          <SendIcon />
+                        </IconButton>
+                      )}
+                    </>
+                  )}
+                </Paper>
+              </div>
+            </Draggable>
           )}
-        </>
-      )}
-      {obsidianUnavailable && (
-        <>
-          <MaterialAlert severity="error">
-            Could not connect to Obsidian! Make sure Obsidian is running and
-            that the Obsidian Local REST API plugin is enabled.
-          </MaterialAlert>
-        </>
-      )}
-      {!ready && !obsidianUnavailable && (
-        <div className="loading">
-          {" "}
-          <Typography paragraph={true}>
-            Gathering page information...
-          </Typography>
-          <CircularProgress />
         </div>
-      )}
-      {status && <Alert value={status} />}
-    </ThemeProvider>
-  );
-};
+      </ThemeProvider>
+    );
+  };
 
-ReactDOM.render(
-  <React.StrictMode>
-    <Popup />
-  </React.StrictMode>,
-  document.getElementById("root")
-);
+  const root = document.createElement("div");
+  root.id = ROOT_CONTAINER_ID;
+  const shadowContainer = root.attachShadow({ mode: "open" });
+
+  const styleResetRoot = document.createElement("style");
+  styleResetRoot.innerHTML = ":host {all: initial}";
+  shadowContainer.appendChild(styleResetRoot);
+
+  const popupRoot = document.createElement("div");
+  shadowContainer.appendChild(popupRoot);
+
+  const emotionRoot = document.createElement("div");
+  shadowContainer.appendChild(emotionRoot);
+
+  const stylesRoot = document.createElement("style");
+  stylesRoot.innerHTML = styles;
+  shadowContainer.appendChild(stylesRoot);
+
+  const sandbox = document.createElement("iframe");
+  sandbox.id = "handlebars-sandbox";
+  sandbox.src = chrome.runtime.getURL("handlebars.html");
+  sandbox.hidden = true;
+  shadowContainer.appendChild(sandbox);
+
+  const cache = createCache({
+    key: "obsidian-web",
+    prepend: true,
+    container: emotionRoot,
+  });
+
+  document.body.prepend(root);
+
+  ReactDOM.render(
+    <React.StrictMode>
+      <CacheProvider value={cache}>
+        {/* Allows us to be sure we're positioned far above the page zIndex" */}
+        <div style={{ position: "relative", zIndex: "999999999" }}>
+          <Popup sandbox={sandbox} />
+        </div>
+      </CacheProvider>
+    </React.StrictMode>,
+    popupRoot
+  );
+}

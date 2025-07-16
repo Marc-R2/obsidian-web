@@ -1,23 +1,67 @@
 import TurndownService from "turndown";
 
-import { ExtensionLocalSettings, ExtensionSyncSettings } from "./types";
+import {
+  ExtensionLocalSettings,
+  ExtensionSyncSettings,
+  OutputPreset,
+  PreviewContext,
+} from "./types";
 
-export const MinVersion = "1.3.1";
+export const CurrentMaxOnboardingVersion = "3.2";
 
 export const DefaultContentTemplate =
-  '---\npage-title: {{json page.title}}\nurl: {{page.url}}\ndate: "{{date}}"\n---\n{{#if page.selectedText}}\n\n{{quote page.selectedText}}\n{{/if}}';
+  '---\npage-title: {{json page.title}}\nurl: {{page.url}}\nweb-message:\nweb-badge-color: ""\nweb-badge-message:\ndate: "{{date}}"\n---\n{{#if page.selectedText}}\n\n{{quote page.selectedText}}\n{{/if}}';
 export const DefaultUrlTemplate = "/vault/{{filename page.title}}.md";
 export const DefaultHeaders = {};
 export const DefaultMethod = "put";
 
+export const LocalSettingsVersion = "3.0";
+
 export const DefaultLocalSettings: ExtensionLocalSettings = {
-  version: "0.1",
-  insecureMode: false,
+  version: LocalSettingsVersion,
+  url: "https://127.0.0.1:27124/",
   apiKey: "",
 };
 
+export const DefaultPreviewContext: PreviewContext = {
+  page: {
+    url: "https://fortelabs.com/blog/para/",
+    title:
+      "The PARA Method: The Simple System for Organizing Your Digital Life in Seconds",
+    selectedText: "Imagine for a moment the perfect organizational system.",
+    content: "CONTENT",
+  },
+  article: {
+    title:
+      "The PARA Method: The Simple System for Organizing Your Digital Life in Seconds",
+    length: 1000,
+    excerpt:
+      "It’s called PARA – a simple, comprehensive, yet extremely flexible system for organizing any type of digital information across any platform.",
+    byline: "Tiago Forte",
+    dir: "ltr",
+    siteName: "Forte Labs",
+  },
+};
+
+export const KnownLocalSettingKeys = [
+  "version",
+  "url",
+  "host",
+  "insecureMode",
+  "apiKey",
+];
+
+export const DefaultSearchMatchTemplate: OutputPreset = {
+  contentTemplate:
+    "## {{date}}\n{{#if page.selectedText}}\n\n{{quote page.selectedText}}\n{{/if}}",
+  headers: {},
+  method: "post",
+};
+
+export const SyncSettingsVersion = "2.1";
+
 export const DefaultSyncSettings: ExtensionSyncSettings = {
-  version: "0.1",
+  version: SyncSettingsVersion,
   presets: [
     {
       name: "Append to current daily note",
@@ -42,20 +86,34 @@ export const DefaultSyncSettings: ExtensionSyncSettings = {
       headers: DefaultHeaders,
       method: DefaultMethod,
     },
-    {
-      name: "Append to existing note",
-      urlTemplate: "",
-      contentTemplate:
-        "## {{date}}\n{{#if page.selectedText}}\n\n{{quote page.selectedText}}\n{{/if}}",
-      headers: {},
-      method: "post",
-    },
   ],
-  searchEnabled: false,
-  searchBackgroundEnabled: false,
-  searchMatchMentionTemplate: "",
-  searchMatchDirectTemplate: "Append to existing note",
+  searchMatch: {
+    enabled: false,
+    backgroundEnabled: false,
+    autoOpen: "never",
+    hoverEnabled: false,
+    mentions: {
+      suggestionEnabled: false,
+      template: DefaultSearchMatchTemplate,
+    },
+    direct: {
+      suggestionEnabled: true,
+      template: DefaultSearchMatchTemplate,
+    },
+  },
+  onboardedToVersion: "",
 };
+
+export const KnownSyncSettingKeys = [
+  "version",
+  "presets",
+  "searchMatch",
+  "searchEnabled",
+  "searchBackgroundEnabled",
+  "searchMatchMentionTemplate",
+  "searchMatchDirectTemplate",
+  "onboardedToVersion",
+];
 
 export const TurndownConfiguration: TurndownService.Options = {
   headingStyle: "atx",
@@ -64,3 +122,5 @@ export const TurndownConfiguration: TurndownService.Options = {
   codeBlockStyle: "fenced",
   emDelimiter: "*",
 };
+
+export const MaximumErrorLogLength = 250;
