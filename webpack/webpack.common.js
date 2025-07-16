@@ -1,7 +1,9 @@
-const webpack = require("webpack");
 const path = require("path");
 const CopyPlugin = require("copy-webpack-plugin");
 const srcDir = path.join(__dirname, "..", "src");
+const { DefinePlugin } = require("webpack");
+
+const { v4: uuidv4 } = require("uuid");
 
 module.exports = {
   entry: {
@@ -29,6 +31,10 @@ module.exports = {
         use: "ts-loader",
         exclude: /node_modules/,
       },
+      {
+        test: /\.css$/i,
+        use: ["css-loader"],
+      },
     ],
   },
   resolve: {
@@ -39,8 +45,14 @@ module.exports = {
   },
   plugins: [
     new CopyPlugin({
-      patterns: [{ from: ".", to: "../", context: "public" }],
+      patterns: [
+        { from: ".", to: "../", context: "public" },
+        { from: "src/styles.css", to: "../styles.css" },
+      ],
       options: {},
+    }),
+    new DefinePlugin({
+      BUILD_ID: JSON.stringify(uuidv4()),
     }),
   ],
 };

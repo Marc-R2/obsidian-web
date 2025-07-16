@@ -8,7 +8,6 @@ Do you find yourself on a webpage somewhere and want to add it to your notes so 
 ## Prerequisites
 
 * [Obsidian Local REST API](https://github.com/coddingtonbear/obsidian-local-rest-api)
-  * Note: Supports use only with the default port (27124).
 
 ## Quickstart
 
@@ -18,13 +17,13 @@ Do you find yourself on a webpage somewhere and want to add it to your notes so 
 
 Now you should be able to click on the icon in your toolbar to submit the page you're on to Obsidian:
 
-![popup](http://coddingtonbear-public.s3.amazonaws.com/github/obsidian-web/popup.png)
+![popup](http://coddingtonbear-public.s3.amazonaws.com/github/obsidian-web/popup.3.png)
 
 ## Options
 
 Options can be accessed by right-clicking on the icon in your toolbar and pressing  "Options".
 
-![options](http://coddingtonbear-public.s3.amazonaws.com/github/obsidian-web/options.png)
+![options](http://coddingtonbear-public.s3.amazonaws.com/github/obsidian-web/options.3.png)
 
 ## Development
 
